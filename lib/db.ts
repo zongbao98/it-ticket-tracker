@@ -1,5 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import postgres from "postgres";
 import type { Priority, Status } from "./sla.ts";
 
 export type Ticket = {
@@ -9,9 +8,9 @@ export type Ticket = {
   priority: Priority;
   status: Status;
   raised_by: string;
-  created_at: string;
-  due_at: string;
-  resolved_at: string | null;
+  created_at: Date;
+  due_at: Date;
+  resolved_at: Date | null;
 };
 
 export type TicketEvent = {
@@ -20,79 +19,79 @@ export type TicketEvent = {
   from_status: Status | null;
   to_status: Status;
   agent: string;
-  at: string;
+  at: Date;
 };
 
-mkdirSync("data", { recursive: true });
-export const db = new DatabaseSync("data/tickets.db");
+const url = process.env.DATABASE_URL;
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA foreign_keys = ON;
-  CREATE TABLE IF NOT EXISTS tickets (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    category    TEXT NOT NULL,
-    description TEXT NOT NULL,
-    priority    TEXT NOT NULL CHECK (priority IN ('P1','P2','P3','P4')),
-    status      TEXT NOT NULL CHECK (status IN ('Open','In Progress','Resolved','Closed')),
-    raised_by   TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    due_at      TEXT NOT NULL,
-    resolved_at TEXT
-  );
-  CREATE TABLE IF NOT EXISTS ticket_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
-    from_status TEXT,
-    to_status   TEXT NOT NULL,
-    agent       TEXT NOT NULL,
-    at          TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_tickets_queue ON tickets(status, due_at);
-  CREATE INDEX IF NOT EXISTS idx_events_ticket ON ticket_events(ticket_id);
-`);
+// One client per server instance; reused across dev hot reloads so connections don't pile up.
+// It connects lazily, so the build works without DATABASE_URL; ensureSchema() checks it.
+const g = globalThis as unknown as { sql?: postgres.Sql };
+// prepare: false is required by Supabase's transaction pooler (port 6543).
+export const sql = (g.sql ??= postgres(url ?? "", { prepare: false, max: 5 }));
 
-export function transaction<T>(fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (e) {
-    db.exec("ROLLBACK");
+// Every query path calls this first. Runs the DDL once per server instance. RLS on with no policies
+// blocks Supabase's public REST API from these tables; the app connects as the owner, which RLS doesn't restrict.
+let ready: Promise<unknown> | undefined;
+export function ensureSchema() {
+  if (!url) return Promise.reject(new Error("DATABASE_URL is not set (see README: Supabase setup)"));
+  return (ready ??= sql.unsafe(`
+    CREATE TABLE IF NOT EXISTS tickets (
+      id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      category    text NOT NULL,
+      description text NOT NULL,
+      priority    text NOT NULL CHECK (priority IN ('P1','P2','P3','P4')),
+      status      text NOT NULL CHECK (status IN ('Open','In Progress','Resolved','Closed')),
+      raised_by   text NOT NULL,
+      created_at  timestamptz NOT NULL,
+      due_at      timestamptz NOT NULL,
+      resolved_at timestamptz
+    );
+    CREATE TABLE IF NOT EXISTS ticket_events (
+      id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ticket_id   integer NOT NULL REFERENCES tickets(id),
+      from_status text,
+      to_status   text NOT NULL,
+      agent       text NOT NULL,
+      at          timestamptz NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tickets_queue ON tickets(status, due_at);
+    CREATE INDEX IF NOT EXISTS idx_events_ticket ON ticket_events(ticket_id);
+    ALTER TABLE tickets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ticket_events ENABLE ROW LEVEL SECURITY;
+  `).catch((e) => {
+    ready = undefined; // retry on the next request instead of caching the failure
     throw e;
-  }
+  }));
 }
 
-export function insertTicket(t: Omit<Ticket, "id" | "status" | "resolved_at">): number {
-  return transaction(() => {
-    const { lastInsertRowid } = db
-      .prepare(
-        `INSERT INTO tickets (category, description, priority, status, raised_by, created_at, due_at)
-         VALUES (?, ?, ?, 'Open', ?, ?, ?)`,
-      )
-      .run(t.category, t.description, t.priority, t.raised_by, t.created_at, t.due_at);
-    const id = Number(lastInsertRowid);
-    db.prepare(
-      `INSERT INTO ticket_events (ticket_id, from_status, to_status, agent, at) VALUES (?, NULL, 'Open', ?, ?)`,
-    ).run(id, t.raised_by, t.created_at);
+export async function insertTicket(t: Omit<Ticket, "id" | "status" | "resolved_at">): Promise<number> {
+  await ensureSchema();
+  return sql.begin(async (tx) => {
+    const [{ id }] = await tx<{ id: number }[]>`
+      INSERT INTO tickets (category, description, priority, status, raised_by, created_at, due_at)
+      VALUES (${t.category}, ${t.description}, ${t.priority}, 'Open', ${t.raised_by}, ${t.created_at}, ${t.due_at})
+      RETURNING id`;
+    await tx`
+      INSERT INTO ticket_events (ticket_id, from_status, to_status, agent, at)
+      VALUES (${id}, NULL, 'Open', ${t.raised_by}, ${t.created_at})`;
     return id;
   });
 }
 
 /** Everything not Closed; active work first by deadline, then Resolved awaiting close. */
-export function listQueue(): Ticket[] {
-  return db
-    .prepare(`SELECT * FROM tickets WHERE status != 'Closed' ORDER BY status = 'Resolved', due_at`)
-    .all() as unknown as Ticket[];
+export async function listQueue(): Promise<Ticket[]> {
+  await ensureSchema();
+  return sql<Ticket[]>`SELECT * FROM tickets WHERE status <> 'Closed' ORDER BY status = 'Resolved', due_at`;
 }
 
-export function getTicket(id: number): Ticket | undefined {
-  return db.prepare(`SELECT * FROM tickets WHERE id = ?`).get(id) as unknown as Ticket | undefined;
+export async function getTicket(id: number): Promise<Ticket | undefined> {
+  await ensureSchema();
+  const [t] = await sql<Ticket[]>`SELECT * FROM tickets WHERE id = ${id}`;
+  return t;
 }
 
-export function getEvents(ticketId: number): TicketEvent[] {
-  return db
-    .prepare(`SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY at, id`)
-    .all(ticketId) as unknown as TicketEvent[];
+export async function getEvents(ticketId: number): Promise<TicketEvent[]> {
+  await ensureSchema();
+  return sql<TicketEvent[]>`SELECT * FROM ticket_events WHERE ticket_id = ${ticketId} ORDER BY at, id`;
 }

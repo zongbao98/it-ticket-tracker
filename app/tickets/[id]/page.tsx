@@ -17,10 +17,10 @@ export default function TicketPage({ params }: PageProps<"/tickets/[id]">) {
 async function TicketDetail({ params }: { params: PageProps<"/tickets/[id]">["params"] }) {
   await connection();
   const id = Number((await params).id);
-  const ticket = Number.isInteger(id) ? getTicket(id) : undefined;
+  const ticket = Number.isInteger(id) ? await getTicket(id) : undefined;
   if (!ticket) notFound();
 
-  const events = getEvents(id);
+  const events = await getEvents(id);
   const { state, msLeft } = slaState(ticket);
   const s = SLA_STYLE[state];
   const next = NEXT_STATUS[ticket.status];

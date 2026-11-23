@@ -1,10 +1,12 @@
 // Fills an empty database with sample tickets covering every SLA colour. Refuses if tickets already exist.
-import { db, insertTicket } from "../lib/db.ts";
+import { ensureSchema, insertTicket, sql } from "../lib/db.ts";
 import { dueAt, type Priority } from "../lib/sla.ts";
 
-const { n } = db.prepare("SELECT COUNT(*) AS n FROM tickets").get() as { n: number };
+await ensureSchema();
+const [{ n }] = await sql<{ n: number }[]>`SELECT COUNT(*)::int AS n FROM tickets`;
 if (n > 0) {
   console.error(`Database already has ${n} tickets; not seeding.`);
+  await sql.end();
   process.exit(1);
 }
 
@@ -19,10 +21,11 @@ const samples: [Priority, string, string, string, number][] = [
 
 for (const [priority, category, description, raised_by, age] of samples) {
   const created = hoursAgo(age);
-  insertTicket({
+  await insertTicket({
     priority, category, description, raised_by,
-    created_at: created.toISOString(),
-    due_at: dueAt(created, priority).toISOString(),
+    created_at: created,
+    due_at: dueAt(created, priority),
   });
 }
 console.log(`Seeded ${samples.length} tickets.`);
+await sql.end();

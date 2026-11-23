@@ -16,7 +16,7 @@ export default function QueuePage() {
 async function Queue() {
   await connection();
   const now = new Date();
-  const tickets = listQueue();
+  const tickets = await listQueue();
 
   return (
     <>

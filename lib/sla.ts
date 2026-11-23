@@ -27,7 +27,7 @@ export function dueAt(createdAt: Date, priority: Priority): Date {
 
 /** The SLA clock stops at resolved_at; otherwise it runs until now. */
 export function slaState(
-  t: { priority: Priority; due_at: string; resolved_at: string | null },
+  t: { priority: Priority; due_at: Date | string; resolved_at: Date | string | null },
   now: Date = new Date(),
 ): { state: SlaState; msLeft: number } {
   const end = t.resolved_at ? new Date(t.resolved_at) : now;
@@ -37,9 +37,9 @@ export function slaState(
   return { state, msLeft };
 }
 
-// shortcut: formats in the server's time zone; render on the client if agents work across time zones.
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+// Vercel servers run in UTC, so set APP_TIMEZONE (e.g. "Asia/Singapore") to show local times.
+export function formatTime(d: Date | string): string {
+  return new Date(d).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: process.env.APP_TIMEZONE });
 }
 
 export const SLA_STYLE: Record<SlaState, { label: string; row: string; badge: string }> = {

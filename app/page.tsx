@@ -1,9 +1,19 @@
 import Link from "next/link";
 import { connection } from "next/server";
+import { Suspense } from "react";
 import { listQueue } from "@/lib/db";
 import { SLA_STYLE, formatLeft, slaState } from "@/lib/sla";
 
-export default async function QueuePage() {
+// The Suspense boundary must live in the page: a layout boundary doesn't cover client navigations.
+export default function QueuePage() {
+  return (
+    <Suspense fallback={<p className="text-zinc-500">Loading…</p>}>
+      <Queue />
+    </Suspense>
+  );
+}
+
+async function Queue() {
   await connection();
   const now = new Date();
   const tickets = listQueue();

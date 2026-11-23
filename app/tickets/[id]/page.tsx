@@ -1,10 +1,20 @@
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
+import { Suspense } from "react";
 import { changeStatus } from "@/lib/actions";
 import { getEvents, getTicket } from "@/lib/db";
 import { NEXT_STATUS, SLA_STYLE, formatLeft, formatTime, slaState } from "@/lib/sla";
 
-export default async function TicketPage({ params }: PageProps<"/tickets/[id]">) {
+// The Suspense boundary must live in the page: a layout boundary doesn't cover client navigations.
+export default function TicketPage({ params }: PageProps<"/tickets/[id]">) {
+  return (
+    <Suspense fallback={<p className="text-zinc-500">Loading…</p>}>
+      <TicketDetail params={params} />
+    </Suspense>
+  );
+}
+
+async function TicketDetail({ params }: { params: PageProps<"/tickets/[id]">["params"] }) {
   await connection();
   const id = Number((await params).id);
   const ticket = Number.isInteger(id) ? getTicket(id) : undefined;

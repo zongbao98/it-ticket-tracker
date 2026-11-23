@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Suspense } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -22,8 +21,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           </nav>
         </header>
         <main className="mx-auto max-w-5xl px-4 py-6">
-          {/* Pages read the database per request, so they stream in behind this boundary. */}
-          <Suspense fallback={<p className="text-zinc-500">Loading…</p>}>{children}</Suspense>
+          {children}
         </main>
       </body>
     </html>
